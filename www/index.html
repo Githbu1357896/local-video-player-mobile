@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#000000">
+  <meta name="mobile-web-app-capable" content="yes">
+  <title>本地视频播放器</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <!-- 媒体库主页：按文件夹归类展示本地视频 -->
+    <div id="folder-select" class="screen active">
+      <header class="library-header">
+        <div class="library-titles">
+          <h1 class="library-title">本地视频播放器</h1>
+          <p id="library-summary" class="library-subtitle">正在扫描本机视频...</p>
+        </div>
+      </header>
+
+      <div class="library-body">
+        <!-- 下拉刷新指示器（默认隐藏在列表上方，下拉时滑入） -->
+        <div id="ptr" class="ptr">
+          <div class="ptr-spinner"></div>
+          <span id="ptr-text" class="ptr-text">下拉刷新</span>
+        </div>
+
+        <!-- 文件夹卡片列表 -->
+        <main id="folder-list" class="folder-list"></main>
+
+        <!-- 首次扫描加载态（无数据时显示，避免黑屏空列表） -->
+        <div id="library-loading" class="library-loading">
+          <div class="library-loading-spinner"></div>
+          <p>正在扫描本机视频…</p>
+        </div>
+
+        <!-- 空态 / 未授权：显示扫描按钮与提示（有结果时整体隐藏） -->
+        <div id="library-empty" class="library-empty">
+          <div class="logo">
+            <svg viewBox="0 0 64 64" width="80" height="80">
+              <rect x="4" y="12" width="56" height="40" rx="6" fill="none" stroke="currentColor" stroke-width="4"/>
+              <polygon points="24,28 32,38 40,28" fill="currentColor"/>
+            </svg>
+          </div>
+          <h2 id="empty-title" class="empty-title">未发现视频</h2>
+          <button id="select-folder-btn" class="btn-primary">扫描手机视频</button>
+          <p id="scan-status" class="folder-hint">支持 MP4 / MKV / AVI / MOV / WMV 等常见格式</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- 文件夹详情：某文件夹下的视频列表 -->
+    <div id="folder-detail" class="screen">
+      <header class="detail-header">
+        <button id="folder-back-btn" class="icon-btn" aria-label="返回">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M19 12H5M12 19l-7-7 7-7"/>
+          </svg>
+        </button>
+        <div class="detail-titles">
+          <h1 id="folder-detail-title" class="detail-title">文件夹</h1>
+          <p id="folder-detail-subtitle" class="detail-subtitle">0 个视频</p>
+        </div>
+      </header>
+      <main id="video-list" class="video-list"></main>
+    </div>
+
+    <!-- 播放器主界面 -->
+    <div id="player" class="screen">
+      <!-- 舞台：视频与全部播放控件同处一个盒子，全屏时整盒旋转 -->
+      <div id="player-stage">
+
+        <div id="video-viewport">
+          <div id="video-stack"></div>
+        </div>
+
+        <!-- 横屏提示 -->
+        <div id="landscape-hint" class="landscape-hint hidden">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M4 8h16v8H4z"/>
+            <path d="M8 12h8"/>
+          </svg>
+          <span id="landscape-hint-text">全屏观看</span>
+        </div>
+
+        <!-- 顶部标题 -->
+        <div id="top-bar" class="top-bar">
+          <button id="back-btn" class="icon-btn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M19 12H5M12 19l-7-7 7-7"/>
+            </svg>
+          </button>
+          <span id="video-title">未选择视频</span>
+          <div class="spacer"></div>
+        </div>
+
+        <!-- 播放/暂停按钮：单击即可切换，控制栏可见时常驻 -->
+        <div id="play-overlay" class="play-overlay hidden" role="button" aria-label="播放/暂停">
+          <svg class="icon-play" viewBox="0 0 24 24" width="30" height="30" fill="currentColor">
+            <path d="M8 5v14l11-7z"/>
+          </svg>
+          <svg class="icon-pause" viewBox="0 0 24 24" width="30" height="30" fill="currentColor">
+            <rect x="6" y="5" width="4" height="14" rx="1"/>
+            <rect x="14" y="5" width="4" height="14" rx="1"/>
+          </svg>
+        </div>
+
+        <!-- 双击快退 / 快进 -->
+        <div id="seek-zone-left" class="seek-zone left">
+          <div class="seek-circle">
+            <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M11 5L4 12l7 7"/>
+              <path d="M20 5l-7 7 7 7"/>
+            </svg>
+            <span class="seek-text">-15 秒</span>
+          </div>
+        </div>
+        <div id="seek-zone-right" class="seek-zone right">
+          <div class="seek-circle">
+            <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M13 5l7 7-7 7"/>
+              <path d="M4 5l7 7-7 7"/>
+            </svg>
+            <span class="seek-text">+15 秒</span>
+          </div>
+        </div>
+
+        <!-- 底部控制栏 -->
+        <div id="bottom-controls" class="bottom-controls">
+          <div class="progress-row">
+            <span id="current-time" class="time">00:00</span>
+            <div id="progress-container" class="progress-container">
+              <div id="progress-bg" class="progress-bg"></div>
+              <div id="progress-fill" class="progress-fill"></div>
+              <div id="progress-thumb" class="progress-thumb"></div>
+            </div>
+            <span id="total-time" class="time">00:00</span>
+            <button id="settings-btn" class="icon-btn settings-btn">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+                <line x1="4" y1="7" x2="15" y2="7"/>
+                <line x1="18" y1="5" x2="18" y2="9"/>
+                <line x1="9" y1="17" x2="20" y2="17"/>
+                <line x1="6" y1="15" x2="6" y2="19"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <!-- 底部设置弹窗（放在舞台内，全屏旋转时跟随一起转） -->
+        <div id="settings-modal" class="settings-modal">
+          <div id="settings-backdrop" class="settings-backdrop"></div>
+          <div id="settings-panel" class="settings-panel">
+            <div class="settings-handle"></div>
+            <div class="settings-content">
+              <div class="settings-item" id="speed-item">
+                <svg class="settings-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M12 2a10 10 0 100 20 10 10 0 000-20z"/>
+                  <path d="M12 6v6l4 2"/>
+                </svg>
+                <span class="settings-label">倍速</span>
+                <span class="settings-value" id="speed-value">1.0X</span>
+              </div>
+
+              <div class="settings-item" id="pip-item">
+                <svg class="settings-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <rect x="3" y="4" width="18" height="14" rx="2"/>
+                  <rect x="14" y="9" width="7" height="6" rx="1" fill="white" fill-opacity="0.2"/>
+                </svg>
+                <span class="settings-label">开启画中画模式</span>
+              </div>
+
+              <div class="settings-divider"></div>
+
+              <div class="settings-slider">
+                <svg class="settings-icon small" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="12" cy="12" r="5"/>
+                  <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
+                </svg>
+                <div class="slider-track" id="brightness-track">
+                  <div class="slider-fill" id="brightness-fill"></div>
+                  <div class="slider-thumb" id="brightness-thumb"></div>
+                </div>
+                <span class="slider-value" id="brightness-value">100%</span>
+              </div>
+
+              <div class="settings-slider">
+                <svg class="settings-icon small" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+                  <path d="M15.54 8.46a5 5 0 010 7.07M19.07 4.93a10 10 0 010 14.14"/>
+                </svg>
+                <div class="slider-track" id="volume-track">
+                  <div class="slider-fill" id="volume-fill"></div>
+                  <div class="slider-thumb" id="volume-thumb"></div>
+                </div>
+                <span class="slider-value" id="volume-value">100%</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div><!-- /#player-stage -->
+    </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

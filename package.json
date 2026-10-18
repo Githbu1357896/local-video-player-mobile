@@ -1,0 +1,20 @@
+{
+  "name": "local-video-player-mobile",
+  "version": "1.0.0",
+  "private": true,
+  "description": "竖屏滑动切换的本地视频播放器（Capacitor Android 版）",
+  "scripts": {
+    "sync": "cap sync android",
+    "open": "cap open android",
+    "verify": "node tools/verify-chrome.js",
+    "build:apk": "cd android && gradlew assembleDebug",
+    "build:aab": "cd android && gradlew bundleRelease"
+  },
+  "dependencies": {
+    "@capacitor/core": "^7.0.0"
+  },
+  "devDependencies": {
+    "@capacitor/android": "^7.0.0",
+    "@capacitor/cli": "^7.0.0"
+  }
+}

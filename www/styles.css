@@ -1,0 +1,1237 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  background: #000;
+  color: #fff;
+  /* 移动端：禁用下拉刷新、回弹，避免和上下滑切换冲突 */
+  overscroll-behavior: none;
+  touch-action: none;
+  -webkit-text-size-adjust: 100%;
+}
+
+/* 用 100dvh 兼容移动端地址栏引起的视口高度变化 */
+#app {
+  width: 100%;
+  height: 100%;
+  min-height: 100vh;
+  min-height: 100dvh;
+  position: relative;
+  overflow: hidden;
+}
+
+/* 刘海屏 / 挖孔屏安全区已在 .top-bar / .bottom-controls 中用 safe-area-inset 处理 */
+
+.screen {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  display: none;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.screen.active {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* 媒体库主页 / 文件夹详情页 */
+#folder-select,
+#folder-detail {
+  display: none;
+  flex-direction: column;
+  background: linear-gradient(160deg, #0f0f0f 0%, #141414 100%);
+}
+
+#folder-select.active {
+  display: flex;
+  z-index: 100;
+}
+
+#folder-detail.active {
+  display: flex;
+  z-index: 150;
+}
+
+.folder-select-content {
+  text-align: center;
+  padding: 40px 32px;
+  max-width: 360px;
+}
+
+.logo {
+  color: #3b82f6;
+  margin-bottom: 24px;
+}
+
+.folder-select-content h1 {
+  font-size: 26px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.subtitle {
+  font-size: 15px;
+  color: #a1a1a1;
+  margin-bottom: 40px;
+}
+
+.btn-primary {
+  width: 100%;
+  padding: 15px 24px;
+  border: none;
+  border-radius: 26px;
+  background: #3b82f6;
+  color: #fff;
+  font-size: 16px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s, transform 0.1s;
+}
+
+.btn-primary:hover {
+  background: #2563eb;
+}
+
+.btn-primary:active {
+  transform: scale(0.98);
+}
+
+.folder-hint {
+  margin-top: 20px;
+  font-size: 13px;
+  color: #666;
+  line-height: 1.5;
+}
+
+/* 播放器 */
+#player {
+  display: none;
+  background: #000;
+  overflow: hidden;
+}
+
+#player.active {
+  display: block;
+  z-index: 200;
+}
+
+/*
+ * 舞台：视频与所有播放控件（顶部栏、播放按钮、快进区、底部控制栏）都装在这个盒子里。
+ * 全屏时只需要旋转这一个盒子，内部所有组件自动跟着转，不用逐个写旋转规则。
+ */
+#player-stage {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 100%;
+  height: 100%;
+  transform: translate(-50%, -50%) rotate(0deg);
+  transform-origin: 50% 50%;
+  /* 只过渡 transform。真机全屏靠系统横屏锁定，舞台尺寸会随屏幕变化，
+   * 如果把 width/height 也纳入过渡，旋转时会出现尺寸动画 → 画面闪烁。 */
+  transition: transform 0.3s ease;
+}
+
+/*
+ * 全屏（旋转）模式。
+ * 真机走系统原生横屏锁定，舞台【不】做 CSS 旋转（见 app.js setRotated），
+ * 这里只是浏览器调试用 __SIMULATE_ROTATE 时的视觉旋转。
+ */
+#player.css-rotated #player-stage {
+  width: 100vh;
+  height: 100vw;
+  transform: translate(-50%, -50%) rotate(90deg);
+}
+
+#video-viewport {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+#video-stack {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%; /* 撑满舞台，视频格子才能按舞台高度铺满 */
+  will-change: transform;
+  transition: transform 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+}
+
+.video-item {
+  position: relative;
+  width: 100%;
+  height: 100%; /* 相对舞台高度，全屏旋转后自动变成屏幕宽度 */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+  overflow: hidden;
+}
+
+.video-item video {
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  background: #000;
+  /* 提升为独立合成层：真机全屏靠系统横屏锁定，视频原生渲染；
+   * 这一层提升可避免某些 WebView 在方向/布局变化时把视频画面丢成黑屏。 */
+  transform: translateZ(0);
+  backface-visibility: hidden;
+}
+
+/* 视频封面层：盖在 video 之上的缩略图，挡"首帧前/点播放补缓冲"的黑屏。
+ * 仅在视频真正出画(playing)时由 JS 加 .hidden 淡出；pointer-events:none 不挡点击/滑动手势。 */
+.video-item .video-cover {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+  z-index: 2;               /* 盖在 video 之上 */
+  opacity: 1;
+  transition: opacity 0.2s ease;
+  pointer-events: none;     /* 不拦截视频区的滑动与点击 */
+}
+
+.video-item .video-cover.hidden {
+  opacity: 0;
+}
+
+/* 横屏提示 */
+.landscape-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 118px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 18px;
+  background: rgba(30, 30, 30, 0.92);
+  border-radius: 22px;
+  font-size: 14px;
+  color: #fff;
+  backdrop-filter: blur(10px);
+  pointer-events: auto;
+  cursor: pointer;
+  transition: opacity 0.3s ease, transform 0.25s ease;
+  z-index: 25;
+}
+
+.landscape-hint.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/*
+ * 全屏时隐藏该提示。
+ * "退出全屏"按钮已取消，退出操作改由顶部标题栏返回图标完成，
+ * 这里不再显示按钮，也就不会挡住/干扰中央的播放暂停按钮。
+ */
+#player.rotated-mode .landscape-hint {
+  display: none;
+}
+
+/* 双击快退 / 快进 */
+.seek-zone {
+  position: absolute;
+  top: 0;
+  width: 50%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  opacity: 0;
+  z-index: 22;
+  transition: opacity 0.18s ease;
+}
+
+.seek-zone.left {
+  left: 0;
+}
+
+.seek-zone.right {
+  right: 0;
+}
+
+.seek-zone.active {
+  opacity: 1;
+}
+
+.seek-circle {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  width: 92px;
+  height: 92px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(6px);
+  color: #fff;
+}
+
+.seek-zone.left .seek-circle {
+  margin-right: 26%;
+}
+
+.seek-zone.right .seek-circle {
+  margin-left: 26%;
+}
+
+.seek-zone.active .seek-circle {
+  animation: seek-pop 0.28s ease;
+}
+
+@keyframes seek-pop {
+  0% { transform: scale(0.7); }
+  60% { transform: scale(1.08); }
+  100% { transform: scale(1); }
+}
+
+.seek-text {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+
+/* 顶部栏 */
+.top-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  padding: 12px 16px;
+  padding-top: env(safe-area-inset-top, 12px);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: linear-gradient(to bottom, rgba(0,0,0,0.5), transparent);
+  z-index: 20;
+}
+
+#video-title {
+  flex: 1;
+  font-size: 15px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: center;
+}
+
+.spacer {
+  width: 40px;
+}
+
+.icon-btn {
+  width: 40px;
+  height: 40px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s;
+  backdrop-filter: blur(4px);
+}
+
+.icon-btn:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.icon-btn svg {
+  width: 22px;
+  height: 22px;
+}
+
+/* 播放/暂停按钮：控制栏可见时常驻显示，单击即切换播放状态 */
+.play-overlay {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  /* 缩小尺寸：80px → 56px（仍 ≥ 44px 可点热区），减少对视频画面的遮挡 */
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  /* 关键：之前是 none，导致中央按钮完全点不动 */
+  pointer-events: auto;
+  cursor: pointer;
+  touch-action: manipulation;
+  opacity: 1;
+  transition: opacity 0.25s ease, transform 0.15s ease;
+  /* 高于快进区(22)/横屏提示(25)，保证点击命中 */
+  z-index: 30;
+}
+
+/* 图标同步缩小：56 → 30px，与 56px 圆边距约 13px，更精致 */
+.play-overlay svg {
+  width: 30px;
+  height: 30px;
+}
+
+.play-overlay.hidden {
+  opacity: 0;
+  /* 隐藏时不要拦截视频区的滑动与点击 */
+  pointer-events: none;
+}
+
+.play-overlay:active {
+  transform: translate(-50%, -50%) scale(0.92);
+}
+
+/* 图标随播放状态切换：播放中显示暂停条，暂停时显示播放三角 */
+.play-overlay .icon-pause {
+  display: none;
+}
+
+.play-overlay.is-playing .icon-play {
+  display: none;
+}
+
+.play-overlay.is-playing .icon-pause {
+  display: block;
+}
+
+/* 底部控制栏 */
+.bottom-controls {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  padding: 16px;
+  padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  background: linear-gradient(to top, rgba(0,0,0,0.75), transparent);
+  z-index: 20;
+}
+
+/* 控制栏显示/隐藏 */
+.top-bar,
+.bottom-controls {
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+
+#player.controls-hidden .top-bar {
+  opacity: 0;
+  transform: translateY(-100%);
+  pointer-events: none;
+}
+
+#player.controls-hidden .bottom-controls {
+  opacity: 0;
+  transform: translateY(100%);
+  pointer-events: none;
+}
+
+/* 中间播放图标跟随控制栏一起隐藏 */
+#player.controls-hidden .play-overlay {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* "全屏观看"按钮与进度条/暂停按钮同属控制层：播放中 3 秒后随控制栏一起淡出，
+   单击屏幕再显示。退出全屏后默认可见，可点击再次进入全屏；
+   全屏(rotated-mode)下由 display:none 彻底隐藏，不在此列 */
+#player.controls-hidden .landscape-hint {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/*
+ * 只有真正用 CSS transform 旋转了舞台（浏览器调试 css-rotated）时，
+ * 舞台下沿才落在屏幕左侧、上沿落在屏幕右侧，安全区方向需要跟着换。
+ * 真机是系统原生横屏锁定、舞台并不旋转，这里若照搬会把控制栏顶起
+ * （横屏下 safe-area-inset-left 可能是刘海宽度），所以只作用于 css-rotated。
+ */
+#player.css-rotated .bottom-controls {
+  padding-bottom: calc(16px + env(safe-area-inset-left, 0px));
+}
+
+#player.css-rotated .top-bar {
+  padding-top: calc(12px + env(safe-area-inset-right, 0px));
+}
+
+.progress-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+
+.time {
+  font-size: 13px;
+  font-weight: 500;
+  color: #fff;
+  min-width: 40px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.progress-container {
+  position: relative;
+  flex: 1;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+.progress-bg {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 100%;
+  height: 3px;
+  transform: translateY(-50%);
+  background: rgba(255, 255, 255, 0.35);
+  border-radius: 2px;
+}
+
+.progress-fill {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  height: 3px;
+  transform: translateY(-50%);
+  background: #3b82f6;
+  border-radius: 2px;
+  width: 0%;
+}
+
+.progress-thumb {
+  position: absolute;
+  top: 50%;
+  left: 0%;
+  width: 14px;
+  height: 14px;
+  transform: translate(-50%, -50%);
+  background: #fff;
+  border-radius: 50%;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+  pointer-events: none;
+}
+
+.settings-btn {
+  flex-shrink: 0;
+  margin-left: 4px;
+}
+
+.settings-btn svg {
+  width: 26px;
+  height: 26px;
+}
+
+/* 底部弹窗 */
+.settings-modal {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 300;
+  /* 关键修复：裁住设置面板。面板收起时被 transform 移到屏幕外，本盒子若不加 overflow:hidden，
+   * 面板会"漏"到模态盒之外；转屏时面板 transform 在 translateY↔translateX 之间过渡，
+   * 中间帧会扫过屏幕可见区域 —— 表现为"过渡时弹窗边缘出现在屏幕中"。
+   * 盒子裁剪后，面板在收起/动画途中都不会超出本盒边界，从根上消除露边。 */
+  overflow: hidden;
+}
+
+.settings-modal.active {
+  pointer-events: auto;
+}
+
+.settings-backdrop {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+
+.settings-modal.active .settings-backdrop {
+  opacity: 1;
+}
+
+.settings-panel {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  max-height: 70vh;
+  background: rgba(20, 20, 20, 0.98);
+  border-radius: 20px 20px 0 0;
+  transform: translateY(100%);
+  /*
+   * 收起态（非 .active）：visibility:hidden + transition 里 visibility 延迟 0.35s 才隐藏。
+   * 作用：转屏/切换布局时面板 transform 在 translateY↔translateX 之间做 0.35s 过渡，
+   * 这一"对角线扫屏"的中间帧本应可见（即用户看到的"边缘露出来又消失"）；
+   * 收起态直接不绘制 → 扫屏过程肉眼完全不可见。打开时 .active 立刻 visible，滑入动画照常。
+   */
+  visibility: hidden;
+  transition: transform 0.35s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+              visibility 0s linear 0.35s;
+  display: flex;
+  flex-direction: column;
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+.settings-modal.active .settings-panel {
+  transform: translateY(0);
+  /* 打开：立即可见、滑入动画照常；关闭后由上面 visibility 延迟隐藏收尾 */
+  visibility: visible;
+  transition: transform 0.35s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+              visibility 0s linear 0s;
+}
+
+/*
+ * 全屏（横屏）下：设置面板改为从右侧滑入的抽屉，占画面右侧 30%。
+ */
+#player.rotated-mode .settings-panel {
+  top: 0;
+  bottom: 0;
+  left: auto;
+  right: 0;
+  width: 30%;
+  max-height: none;
+  border-radius: 16px 0 0 16px;
+  transform: translateX(100%);
+  padding-bottom: 0;
+  padding-right: env(safe-area-inset-right, 0px);
+  overflow-y: auto;
+}
+
+#player.rotated-mode .settings-modal.active .settings-panel {
+  transform: translateX(0);
+}
+
+/*
+ * 转屏过渡期（#player.rotating）：用 pointer-events 直接关掉设置按钮与背景的命中，
+ * 作为 app.js 里 isRotating 守卫之外的第二重保险 —— 坐标错乱产生的合成 click 在命中测试阶段
+ * 就找不到这两个元素，因此绝不会触发侧边栏的自动弹出/关闭。转屏稳定后 .rotating 被移除，命中恢复。
+ */
+#player.rotating #settings-btn,
+#player.rotating #settings-backdrop {
+  pointer-events: none;
+}
+
+/*
+ * 全屏下允许手动唤出侧边栏：设置按钮正常显示、点击即可打开右侧 30% 抽屉。
+ * 注意：openSettings 仅由设置按钮点击触发，屏幕旋转(orientationchange)不会自动打开，
+ * 因此旋转过程中侧边栏不会误触弹出，仅用户主动点击才出现。
+ */
+
+/* 窄栏排布：条目可换行堆叠，滑块改成"图标 + 数值"一行、轨道独占一行 */
+#player.rotated-mode .settings-content {
+  padding: 0 12px 20px;
+}
+
+#player.rotated-mode .settings-item {
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 0;
+}
+
+#player.rotated-mode .settings-label {
+  font-size: 14px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+#player.rotated-mode .settings-divider {
+  margin: 8px -12px;
+}
+
+#player.rotated-mode .settings-slider {
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 0;
+}
+
+#player.rotated-mode .settings-slider .settings-icon.small {
+  order: 1;
+}
+
+#player.rotated-mode .slider-value {
+  order: 2;
+  width: auto;
+}
+
+#player.rotated-mode .slider-track {
+  order: 3;
+  flex: 1 1 100%;
+}
+
+.settings-handle {
+  width: 40px;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.25);
+  border-radius: 2px;
+  margin: 12px auto 16px;
+}
+
+.settings-content {
+  padding: 0 16px 24px;
+  overflow-y: auto;
+}
+
+.settings-item {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 0;
+  cursor: pointer;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+
+.settings-item:last-of-type {
+  border-bottom: none;
+}
+
+.settings-icon {
+  width: 24px;
+  height: 24px;
+  color: #fff;
+  flex-shrink: 0;
+}
+
+.settings-label {
+  flex: 1;
+  font-size: 16px;
+  color: #fff;
+}
+
+.settings-value {
+  font-size: 14px;
+  color: #888;
+  flex-shrink: 0;
+}
+
+.settings-divider {
+  height: 8px;
+  background: rgba(255,255,255,0.04);
+  margin: 8px -16px;
+}
+
+.settings-icon.small {
+  width: 20px;
+  height: 20px;
+  color: #aaa;
+  flex-shrink: 0;
+}
+
+.settings-slider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+}
+
+.slider-track {
+  position: relative;
+  flex: 1;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+.slider-track::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 100%;
+  height: 3px;
+  transform: translateY(-50%);
+  background: rgba(255,255,255,0.25);
+  border-radius: 2px;
+}
+
+.slider-fill {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  height: 3px;
+  transform: translateY(-50%);
+  background: #3b82f6;
+  border-radius: 2px;
+  width: 100%;
+}
+
+.slider-thumb {
+  position: absolute;
+  top: 50%;
+  left: 100%;
+  width: 14px;
+  height: 14px;
+  transform: translate(-50%, -50%);
+  background: #fff;
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+.slider-value {
+  width: 42px;
+  text-align: right;
+  font-size: 13px;
+  color: #aaa;
+  flex-shrink: 0;
+}
+
+/* 倍速选择弹窗 */
+.speed-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 8px 0 16px;
+}
+
+.speed-option {
+  padding: 8px 18px;
+  border-radius: 18px;
+  border: 1px solid rgba(255,255,255,0.15);
+  background: rgba(255,255,255,0.05);
+  color: #fff;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.speed-option.active {
+  background: #3b82f6;
+  border-color: #3b82f6;
+}
+
+/* Toast */
+.toast {
+  position: absolute;
+  top: 80px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 8px 16px;
+  background: rgba(0, 0, 0, 0.75);
+  border-radius: 18px;
+  font-size: 14px;
+  color: #fff;
+  opacity: 0;
+  transition: opacity 0.25s ease;
+  pointer-events: none;
+  z-index: 110;
+}
+
+.toast.show {
+  opacity: 1;
+}
+
+/* 响应式 */
+@media (max-width: 420px) {
+  .folder-select-content {
+    padding: 32px 24px;
+  }
+
+  .folder-select-content h1 {
+    font-size: 22px;
+  }
+}
+
+/* ===== 媒体库主页 ===== */
+.library-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px;
+  padding-top: calc(16px + env(safe-area-inset-top, 0px));
+  background: linear-gradient(to bottom, rgba(0,0,0,0.55), transparent);
+  flex-shrink: 0;
+}
+
+.library-titles {
+  flex: 1;
+  min-width: 0;
+}
+
+.library-title {
+  font-size: 22px;
+  font-weight: 700;
+  color: #fff;
+}
+
+.library-subtitle {
+  margin-top: 2px;
+  font-size: 13px;
+  color: #9aa0a6;
+}
+
+/* 主页主体：头部下方的区域（含下拉刷新指示器、列表、加载态、空态） */
+.library-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 下拉刷新指示器：默认藏在列表上方，下拉时滑入 */
+.ptr {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: #9aa0a6;
+  font-size: 13px;
+  z-index: 5;
+  transform: translateY(-56px);
+  opacity: 0;
+  transition: transform 0.2s ease, opacity 0.2s ease;
+  pointer-events: none;
+}
+
+.ptr-spinner {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  border-top-color: #3b82f6;
+  flex-shrink: 0;
+}
+
+/* 刷新中：持续旋转 */
+.ptr.refreshing .ptr-spinner,
+.library-loading-spinner {
+  animation: ptr-spin 0.8s linear infinite;
+}
+
+@keyframes ptr-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* 文件夹列表 */
+.folder-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 4px 12px 24px;
+  display: none;
+  flex-direction: column;
+  gap: 10px;
+  overscroll-behavior: contain;
+}
+
+.folder-list.show {
+  display: flex;
+}
+
+/* 文件夹卡片 */
+.folder-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 16px;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.1s ease;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+}
+
+.folder-card:active {
+  transform: scale(0.985);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.folder-card .card-thumb {
+  position: relative;
+  width: 108px;
+  height: 72px;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #232323 center/cover no-repeat;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #555;
+}
+
+.folder-card .card-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.folder-card .card-thumb .card-thumb-badge {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.6);
+  font-size: 11px;
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+}
+
+.folder-card .card-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.folder-card .card-name {
+  font-size: 16px;
+  font-weight: 600;
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.folder-card .card-path {
+  margin-top: 2px;
+  font-size: 12px;
+  color: #8a8f96;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.folder-card .card-meta {
+  margin-top: 6px;
+  font-size: 13px;
+  color: #b0b5bb;
+}
+
+/* 空态 / 未授权 */
+.library-empty {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 40px 32px;
+  flex: 1;
+  min-height: 0;
+}
+
+.library-empty.show {
+  display: flex;
+}
+
+/* 首次扫描加载态 */
+.library-loading {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  flex: 1;
+  min-height: 0;
+  color: #9aa0a6;
+  font-size: 14px;
+}
+
+.library-loading.show {
+  display: flex;
+}
+
+.library-loading-spinner {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 3px solid rgba(255, 255, 255, 0.2);
+  border-top-color: #3b82f6;
+}
+
+.empty-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: #e8eaed;
+  margin-bottom: 20px;
+}
+
+/* ===== 文件夹详情 ===== */
+.detail-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  padding-top: calc(12px + env(safe-area-inset-top, 0px));
+  background: linear-gradient(to bottom, rgba(0,0,0,0.55), transparent);
+  flex-shrink: 0;
+}
+
+.detail-titles {
+  flex: 1;
+  min-width: 0;
+}
+
+.detail-title {
+  font-size: 18px;
+  font-weight: 700;
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.detail-subtitle {
+  margin-top: 2px;
+  font-size: 12px;
+  color: #9aa0a6;
+}
+
+/* 视频列表 */
+.video-list {
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 4px 12px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.video-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 8px;
+  border: none;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.1s ease;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+}
+
+.video-row:active {
+  transform: scale(0.985);
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.video-row .video-thumb {
+  position: relative;
+  width: 112px;
+  height: 66px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #232323;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #555;
+}
+
+.video-row .video-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.video-row .video-thumb .video-duration {
+  position: absolute;
+  right: 5px;
+  bottom: 5px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.65);
+  font-size: 11px;
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+}
+
+.video-row .video-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.video-row .video-name {
+  font-size: 15px;
+  font-weight: 500;
+  color: #fff;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.video-row .video-meta {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #8a8f96;
+  font-variant-numeric: tabular-nums;
+}
+
+.video-row .video-play {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: rgba(59, 130, 246, 0.18);
+  color: #3b82f6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 空列表提示 */
+.list-empty {
+  padding: 40px 20px;
+  text-align: center;
+  color: #6b7075;
+  font-size: 14px;
+}

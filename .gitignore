@@ -1,0 +1,35 @@
+# ===== 依赖（不提交，npm install 还原）=====
+node_modules/
+
+# ===== 构建产物（不提交，构建时重新生成）=====
+android/app/build/
+android/build/
+android/.gradle/
+android/capacitor-cordova-android-plugins/build/
+android/local.properties
+*.apk
+*.aab
+dist/
+
+# ===== 验证脚本临时产物（无头 Chrome 配置目录 + 日志）=====
+.chrome-profile-*/
+*.log
+
+# ===== 签名密钥 / 敏感配置（严禁提交）=====
+*.jks
+*.keystore
+*.p12
+*.pem
+*.key
+keystore.properties
+google-services.json
+.env
+.env.*
+
+# ===== 操作系统 / 编辑器 =====
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.iml
+.workbuddy/

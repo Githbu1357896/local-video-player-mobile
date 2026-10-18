@@ -1,0 +1,17 @@
+{
+  "appId": "com.localvideo.player",
+  "appName": "本地视频播放器",
+  "webDir": "www",
+  "bundledWebRuntime": true,
+  "loggingBehavior": "none",
+  "server": {
+    "androidScheme": "https",
+    "cleartext": true
+  },
+  "android": {
+    "allowMixedContent": true,
+    "captureInput": false,
+    "webContentsDebuggingEnabled": true,
+    "minWebViewVersion": 60
+  }
+}
