@@ -164,6 +164,9 @@ html, body {
   width: 100%;
   height: 100%;
   overflow: hidden;
+  /* 禁掉浏览器原生手势（页面缩放/滚动/回弹），改由 JS 实现双指捏合与单指平移，
+     避免原生行为与自定义缩放手势打架 */
+  touch-action: none;
 }
 
 #video-stack {
@@ -198,6 +201,8 @@ html, body {
    * 这一层提升可避免某些 WebView 在方向/布局变化时把视频画面丢成黑屏。 */
   transform: translateZ(0);
   backface-visibility: hidden;
+  /* 缩放/平移以左上角为原点：JS 的焦点缩放与平移边界计算均基于 origin 0 0 */
+  transform-origin: 0 0;
 }
 
 /* 视频封面层：盖在 video 之上的缩略图，挡"首帧前/点播放补缓冲"的黑屏。
@@ -214,10 +219,63 @@ html, body {
   opacity: 1;
   transition: opacity 0.2s ease;
   pointer-events: none;     /* 不拦截视频区的滑动与点击 */
+  /* 与 video 相同 origin，缩放时两层变换保持一致 */
+  transform-origin: 0 0;
 }
 
 .video-item .video-cover.hidden {
   opacity: 0;
+}
+
+/* ===== 画面缩放（双击放大 / 双指捏合 / 一键复位）=====
+ * 变换只写在 video 与封面两个元素上（translate3d + scale），由合成器执行、不触发布局；
+ * 双击/复位加 .zoom-anim 走 0.22s 过渡；捏合/平移过程不加过渡，保证跟手。 */
+.video-item video.zoom-anim {
+  transition: transform 0.22s ease;
+}
+
+.video-item .video-cover.zoom-anim {
+  transition: opacity 0.2s ease, transform 0.22s ease;
+}
+
+/* 仅在手势进行中提升为合成层候选，避免长期占用显存 */
+.video-item video.zooming,
+.video-item .video-cover.zooming {
+  will-change: transform;
+}
+
+/* 一键复位按钮：仅放大态出现（.show），不随控制栏自动隐藏——放大后随时可复位 */
+.zoom-reset-btn {
+  position: absolute;
+  right: 14px;
+  bottom: 96px;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border: none;
+  border-radius: 20px;
+  background: rgba(30, 30, 30, 0.88);
+  color: #fff;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transform: translateY(8px);
+  pointer-events: none;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  backdrop-filter: blur(10px);
+}
+
+.zoom-reset-btn.show {
+  opacity: 1;
+  transform: none;
+  pointer-events: auto;
+}
+
+.zoom-reset-btn svg {
+  flex: none;
 }
 
 /* 横屏提示 */

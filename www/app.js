@@ -40,6 +40,8 @@ const progressThumb = document.getElementById('progress-thumb');
 const currentTimeEl = document.getElementById('current-time');
 const totalTimeEl = document.getElementById('total-time');
 const playOverlay = document.getElementById('play-overlay');
+const zoomResetBtn = document.getElementById('zoom-reset-btn');
+const zoomResetText = document.getElementById('zoom-reset-text');
 const landscapeHint = document.getElementById('landscape-hint');
 const landscapeHintText = document.getElementById('landscape-hint-text');
 const settingsBtn = document.getElementById('settings-btn');
@@ -491,6 +493,10 @@ function playVideoInFolder(folderPath, index) {
   state.returnTo = 'folder';
   state.videos = folder.videos; // 播放范围限定为该文件夹
   state.currentIndex = index;
+  // 从文件夹"新进入"播放器 = 新会话：显示控制栏（播放中随后自动隐藏）。
+  // 注意：会话内上下滑切换走 loadVideoAtIndex，不再强制显示，以保持用户已设的隐藏状态。
+  cancelAutoHide();
+  setControlsVisible(true);
   showScreen('player');
   buildVideoStack();
   loadVideoAtIndex(index);
@@ -859,7 +865,10 @@ function buildVideoStack() {
 
     el.addEventListener('click', (e) => {
       e.stopPropagation();
-      handleVideoTap(el, screenToStage(e.clientX, e.clientY).x);
+      // 捏合结束后浏览器可能补发 click，屏蔽掉避免误触发缩放/控制栏
+      if (suppressNextClick) { suppressNextClick = false; return; }
+      const p = screenToStage(e.clientX, e.clientY);
+      handleVideoTap(el, p.x, e.clientX, e.clientY);
     });
 
     // 封面显隐：真正播放出画(playing)才隐藏；缓冲(waiting)/拖动 seek(seeking)时盖回挡黑屏
@@ -868,6 +877,9 @@ function buildVideoStack() {
     el.addEventListener('seeking', () => showCover(el.__cover));
     el.addEventListener('seeked', () => hideCover(el.__cover));
   });
+
+  // 新栈里的视频一律原始尺寸：确保复位按钮不残留
+  updateZoomResetBtn();
 }
 
 /** 显示/隐藏视频封面层（首帧前与缓冲中的占位，挡黑屏） */
@@ -913,7 +925,7 @@ function ensureWindowLoaded(index) {
   }
 }
 
-// 单击显示/隐藏控制栏；双击播放/暂停；双击左/右边缘快退/快进 15 秒
+// 单击显示/隐藏控制栏；双击中间放大/复位画面；双击左/右边缘快退/快进 15 秒
 const DOUBLE_TAP_DELAY = 260;
 const SEEK_EDGE_RATIO = 0.3; // 左右各 30% 宽度为快退/快进区
 const AUTO_HIDE_DELAY = 3000; // 播放中无操作 3 秒自动隐藏控制栏
@@ -923,6 +935,229 @@ const SWIPE_SWITCH_RATIO = 0.08;
 
 let tapTimer = null;
 let autoHideTimer = null;
+
+// ===== 画面缩放（双击放大 / 双指捏合 / 一键复位）=====
+// 手势分工（与切换视频、快进快退明确分区，互不冲突）：
+//   · 未放大：单指上下滑 = 切换视频（原有逻辑，阈值 SWIPE_SWITCH_RATIO）；
+//             双击左右各 30% 边缘 = 快退/快进（原有逻辑）；
+//             双击中间 = 放大到 ZOOM_DOUBLE_TAP 倍（以点击点为焦点）。
+//   · 已放大：单指拖动 = 平移画面（不再切换视频）；
+//             双击中间 = 一键恢复原始尺寸。
+//   · 双指捏合 = 连续缩放 ZOOM_MIN~ZOOM_MAX（以双指中点为焦点）。
+//   · 右下角"↺"按钮 = 一键恢复原始尺寸（放大态随时可用，不随控制栏隐藏）。
+//   · 桌面端：Ctrl+滚轮（触控板捏合）= 连续缩放；已放大时鼠标拖动 = 平移。
+// 实现要点：缩放是纯 CSS transform（translate3d + scale，origin 0 0），由合成器线程
+// 执行，不重排、不重绘、不打断解码与播放；手势开始时的布局几何只读一次，
+// 移动过程零布局读取；仅手势期间加 will-change。切换视频/重建视频栈时自动复位。
+const ZOOM_MIN = 1;          // 最小缩放比例（原始尺寸）
+const ZOOM_MAX = 4;          // 最大缩放比例（双指捏合上限）
+const ZOOM_DOUBLE_TAP = 2.5; // 双击放大的目标比例
+const ZOOM_ANIM_MS = 240;    // 双击/复位过渡时长（与 CSS .zoom-anim 0.22s 对应）
+
+// 每个 video 元素自带 __zoom = { scale, x, y }（x/y 为 translate3d 位移）。
+// 封面 <img>（__cover）与 video 应用同一 transform，放大时两层视觉保持一致。
+
+function getZoom(el) {
+  if (!el.__zoom) el.__zoom = { scale: ZOOM_MIN, x: 0, y: 0, animTimer: null };
+  return el.__zoom;
+}
+
+/** 把缩放/平移夹到合法范围：放大后元素必须始终覆盖舞台（不露黑边） */
+function clampZoom(z, w, h) {
+  const maxX = (z.scale - 1) * w;
+  const maxY = (z.scale - 1) * h;
+  z.x = Math.min(0, Math.max(-maxX, z.x));
+  z.y = Math.min(0, Math.max(-maxY, z.y));
+}
+
+/**
+ * 元素未施加缩放变换时的布局几何（client 坐标）。
+ * origin 0 0 时视觉 rect = 布局位置 + 当前位移，减回去即得布局位置；
+ * w/h 取 offsetWidth/offsetHeight（不受 transform 影响）。
+ */
+function zoomGeom(el) {
+  const z = getZoom(el);
+  const r = el.getBoundingClientRect();
+  return { left: r.left - z.x, top: r.top - z.y, w: el.offsetWidth, h: el.offsetHeight };
+}
+
+/** 把当前 zoom 状态写到 video 与封面；animate=true 时加过渡类（双击/复位用） */
+function applyZoom(el, animate) {
+  const z = getZoom(el);
+  const t = `translate3d(${z.x}px, ${z.y}px, 0) scale(${z.scale})`;
+  el.style.transform = t;
+  if (el.__cover) el.__cover.style.transform = t;
+  if (animate) {
+    el.classList.add('zoom-anim');
+    if (el.__cover) el.__cover.classList.add('zoom-anim');
+    clearTimeout(z.animTimer);
+    z.animTimer = setTimeout(() => {
+      el.classList.remove('zoom-anim');
+      if (el.__cover) el.__cover.classList.remove('zoom-anim');
+      z.animTimer = null;
+    }, ZOOM_ANIM_MS);
+  }
+  updateZoomResetBtn();
+}
+
+/**
+ * 以 (clientX, clientY) 为焦点缩放到 targetScale：该点在缩放前后保持在同一屏幕位置。
+ * 原理（origin 0 0）：屏幕坐标 = 布局位置 + 位移 + 比例×局部坐标，
+ * 令焦点局部坐标 p 不动 → 新位移 = 旧位移 - (新比例-旧比例)×p。
+ */
+function zoomToScaleAt(el, targetScale, clientX, clientY) {
+  const z = getZoom(el);
+  const s0 = z.scale;
+  const s1 = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, targetScale));
+  if (s1 === s0) return;
+  const g = zoomGeom(el);
+  const px = (clientX - g.left - z.x) / s0;
+  const py = (clientY - g.top - z.y) / s0;
+  z.scale = s1;
+  z.x -= (s1 - s0) * px;
+  z.y -= (s1 - s0) * py;
+  clampZoom(z, g.w, g.h);
+}
+
+/** 双击中间：放大（以点击点为焦点）；已放大则一键恢复原始尺寸 */
+function toggleZoomAt(el, clientX, clientY) {
+  if (getZoom(el).scale > 1.001) {
+    resetZoom(el);
+  } else {
+    zoomToScaleAt(el, ZOOM_DOUBLE_TAP, clientX, clientY);
+    applyZoom(el, true);
+  }
+}
+
+/** 一键恢复原始尺寸（带过渡动画） */
+function resetZoom(el) {
+  const z = getZoom(el);
+  z.scale = ZOOM_MIN;
+  z.x = 0;
+  z.y = 0;
+  applyZoom(el, true);
+}
+
+/** 立即复位（无动画）：切换视频时清理上一个视频的缩放状态 */
+function resetZoomInstant(el) {
+  const z = getZoom(el);
+  if (z.scale === ZOOM_MIN && z.x === 0 && z.y === 0) return;
+  z.scale = ZOOM_MIN;
+  z.x = 0;
+  z.y = 0;
+  applyZoom(el, false);
+}
+
+let zoomBtnLabel = '';
+function updateZoomResetBtn() {
+  const el = state.videoElements[state.currentIndex];
+  const z = el && el.__zoom;
+  const zoomed = !!z && z.scale > 1.001;
+  zoomResetBtn.classList.toggle('show', zoomed);
+  const label = zoomed ? z.scale.toFixed(1) + '×' : '';
+  if (label !== zoomBtnLabel) {
+    zoomBtnLabel = label;
+    zoomResetText.textContent = label;
+  }
+}
+
+// ---- 缩放手势状态机：pinch（双指捏合）/ pan（放大后单指或鼠标平移）----
+let zoomGesture = null;      // { el, mode, ids, startDist, startScale, geom, lastX, lastY, mouse }
+let suppressNextClick = false; // 捏合结束后屏蔽浏览器补发的 click
+
+function setZoomGestureClass(on) {
+  const g = zoomGesture;
+  if (!g || !g.el) return;
+  g.el.classList.toggle('zooming', on);
+  if (g.el.__cover) g.el.__cover.classList.toggle('zooming', on);
+}
+
+function findTouch(touches, id) {
+  for (let i = 0; i < touches.length; i++) {
+    if (touches[i].identifier === id) return touches[i];
+  }
+  return null;
+}
+
+function startPinch(e) {
+  const el = state.videoElements[state.currentIndex];
+  if (!el) return;
+  const a = e.touches[0];
+  const b = e.touches[1];
+  zoomGesture = {
+    el, mode: 'pinch', ids: [a.identifier, b.identifier],
+    startDist: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY),
+    startScale: getZoom(el).scale,
+    geom: zoomGeom(el),
+  };
+  setZoomGestureClass(true);
+}
+
+function startPan(el, x, y, opts = {}) {
+  zoomGesture = {
+    el, mode: 'pan',
+    ids: opts.ids || [],
+    mouse: !!opts.mouse,
+    lastX: x, lastY: y,
+    geom: zoomGeom(el),
+  };
+  setZoomGestureClass(true);
+}
+
+function updatePinch(e) {
+  const g = zoomGesture;
+  // 按 identifier 找回两根手指：中途抬手/换指不会造成比例跳变
+  const a = findTouch(e.touches, g.ids[0]);
+  const b = findTouch(e.touches, g.ids[1]);
+  if (!a || !b) return;
+  const dist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+  if (dist < 1 || g.startDist < 1) return;
+  const z = getZoom(g.el);
+  const s0 = z.scale;
+  const s1 = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, g.startScale * (dist / g.startDist)));
+  if (s1 === s0) return;
+  // 焦点 = 双指中点，换算成元素局部坐标（基于手势开始时的布局几何，只读一次）
+  const px = ((a.clientX + b.clientX) / 2 - g.geom.left - z.x) / s0;
+  const py = ((a.clientY + b.clientY) / 2 - g.geom.top - z.y) / s0;
+  z.scale = s1;
+  z.x -= (s1 - s0) * px;
+  z.y -= (s1 - s0) * py;
+  clampZoom(z, g.geom.w, g.geom.h);
+  applyZoom(g.el, false);
+}
+
+function updatePanAt(x, y) {
+  const g = zoomGesture;
+  const z = getZoom(g.el);
+  z.x += x - g.lastX;
+  z.y += y - g.lastY;
+  g.lastX = x;
+  g.lastY = y;
+  clampZoom(z, g.geom.w, g.geom.h);
+  applyZoom(g.el, false);
+}
+
+function endZoomGesture(e) {
+  const g = zoomGesture;
+  if (!g) return;
+  setZoomGestureClass(false);
+  zoomGesture = null;
+  if (g.mode === 'pinch') suppressNextClick = true; // 屏蔽捏合后补发的 click
+  // 捏合结束时若仍有一根手指且处于放大态 → 顺势转为平移，手势不断
+  if (e && g.mode === 'pinch' && e.touches && e.touches.length === 1 && getZoom(g.el).scale > 1.001) {
+    const t = e.touches[0];
+    startPan(g.el, t.clientX, t.clientY, { ids: [t.identifier] });
+  }
+}
+
+/** 方向/尺寸变化后按新几何重新夹紧，防止旋转后平移越界 */
+function reclampCurrentZoom() {
+  const el = state.videoElements[state.currentIndex];
+  if (!el || !el.__zoom || el.__zoom.scale <= 1.001) return;
+  const g = zoomGeom(el);
+  clampZoom(el.__zoom, g.w, g.h);
+  applyZoom(el, false);
+}
 
 // 转屏过渡期的"旋转中"标记 + debounce 解除定时器。
 // 真机在「进入/退出全屏」或「横竖屏切换」时系统会旋转屏幕，WebView 在转屏过渡期
@@ -1001,7 +1236,7 @@ function toggleControls() {
   scheduleAutoHide();
 }
 
-function handleVideoTap(video, stageX) {
+function handleVideoTap(video, stageX, clientX, clientY) {
   // 已经有一次待判定的点击 → 这次是双击
   if (tapTimer) {
     clearTimeout(tapTimer);
@@ -1015,7 +1250,9 @@ function handleVideoTap(video, stageX) {
     } else if (ratio >= 1 - SEEK_EDGE_RATIO) {
       seekBySeconds(video, SEEK_STEP, false);
     } else {
-      togglePlay(video); // 双击中间 → 播放/暂停
+      // 双击中间 → 放大 / 一键恢复原始尺寸。
+      // 播放暂停请用中央按钮（常驻可点），避免同一手势承载两个冲突动作。
+      toggleZoomAt(video, clientX, clientY);
     }
     return;
   }
@@ -1077,6 +1314,15 @@ playOverlay.addEventListener('click', (e) => {
   if (!video.paused) scheduleAutoHide();
 });
 
+// 一键复位按钮：仅放大态出现，点击恢复原始尺寸。
+// 阻止冒泡，避免同时触发"单击切换控制栏"与视口的拖拽/平移手势。
+zoomResetBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  const video = state.videoElements[state.currentIndex];
+  if (!video) return;
+  resetZoom(video);
+});
+
 function pauseAllVideos() {
   state.videoElements.forEach(v => {
     v.pause();
@@ -1086,6 +1332,12 @@ function pauseAllVideos() {
 
 function loadVideoAtIndex(index) {
   if (index < 0 || index >= state.videos.length) return;
+
+  // 结束进行中的缩放手势，并把上一个视频的缩放/平移复位（缩放状态不跨视频保留），
+  // 避免带着放大状态切走、或手势中途被打断后状态残留
+  if (zoomGesture) { setZoomGestureClass(false); zoomGesture = null; }
+  const outgoing = state.videoElements[state.currentIndex];
+  if (outgoing) resetZoomInstant(outgoing);
 
   // 暂停旧的（但【不】退出全屏：全屏状态下上下滑切换视频要保持当前方向不变）
   state.videoElements.forEach((v, i) => {
@@ -1107,20 +1359,20 @@ function loadVideoAtIndex(index) {
   videoTitle.textContent = state.videos[index].name;
   updateStackPosition(0);
 
-  // 切换视频：先显示控制栏并清掉旧计时，等 play 事件再重新计时
+  // 切换视频：保持控制栏当前的显隐状态（不强制显示），仅清掉旧计时；等 play 事件再按需重新计时。
+  // 修复：原先无条件 setControlsVisible(true) 会把用户已主动隐藏的控制栏/进度条/中央按钮
+  // 在每次切换时重新弹出，严重影响沉浸观看。现在仅在用户主动单击(toggleControls)后才恢复显示。
   cancelAutoHide();
-  setControlsVisible(true);
 
   // 预加载前后视频；当前视频也设为 auto，加快起播缓冲、缩短黑屏间隙
   currentVideo.preload = 'auto';
   if (index > 0) state.videoElements[index - 1].preload = 'auto';
   if (index < state.videos.length - 1) state.videoElements[index + 1].preload = 'auto';
 
-  // 自动播放（被阻止时把控制栏和中央按钮显示出来，方便手动点播放）
+  // 自动播放（被阻止时不强制弹出控制栏，尊重用户当前显隐状态；单击屏幕即可唤出并手动播放）
   updatePlayOverlay();
   currentVideo.play().catch(err => {
     console.log('自动播放被阻止:', err);
-    setControlsVisible(true);
     updatePlayOverlay();
   });
 
@@ -1130,6 +1382,9 @@ function loadVideoAtIndex(index) {
   if (currentVideo.readyState >= 1) {
     checkAspectRatio(currentVideo);
   }
+
+  // 新视频一律以原始尺寸进入：同步复位按钮显隐
+  updateZoomResetBtn();
 }
 
 function checkAspectRatio(video) {
@@ -1281,40 +1536,104 @@ function onDragEnd() {
   }
 }
 
-// 鼠标事件
+// 鼠标事件（桌面端调试用）
 viewport.addEventListener('mousedown', (e) => {
-  if (e.target.closest('.bottom-controls') || e.target.closest('.top-bar')) return;
+  if (e.target.closest('.bottom-controls') || e.target.closest('.top-bar') || e.target.closest('#zoom-reset-btn')) return;
+  const el = state.videoElements[state.currentIndex];
+  // 已放大 → 鼠标拖动变成平移画面（不切视频）
+  if (el && getZoom(el).scale > 1.001) {
+    startPan(el, e.clientX, e.clientY, { mouse: true });
+    e.preventDefault();
+    return;
+  }
   onDragStart(screenToStage(e.clientX, e.clientY).y);
 });
 
 window.addEventListener('mousemove', (e) => {
+  if (zoomGesture && zoomGesture.mouse) {
+    updatePanAt(e.clientX, e.clientY);
+    return;
+  }
   onDragMove(screenToStage(e.clientX, e.clientY).y);
 });
 
 window.addEventListener('mouseup', () => {
+  if (zoomGesture && zoomGesture.mouse) {
+    endZoomGesture(null);
+    return;
+  }
   onDragEnd();
 });
 
 // 触摸事件
 viewport.addEventListener('touchstart', (e) => {
-  if (e.target.closest('.bottom-controls') || e.target.closest('.top-bar') || e.target.closest('.settings-modal')) return;
+  // 新手势开始：作废上一次捏合留下的 click 屏蔽标记
+  suppressNextClick = false;
+  if (e.target.closest('.bottom-controls') || e.target.closest('.top-bar') || e.target.closest('.settings-modal') || e.target.closest('#zoom-reset-btn')) return;
+
+  // 双指 → 捏合缩放：取消拖拽切换与待判定的点击，并把第一根手指带偏的视频栈归位
+  if (e.touches.length >= 2) {
+    if (tapTimer) { clearTimeout(tapTimer); tapTimer = null; }
+    state.isDragging = false;
+    updateStackPosition(0);
+    startPinch(e);
+    e.preventDefault();
+    return;
+  }
+
+  const el = state.videoElements[state.currentIndex];
+  // 已放大 → 单指变成平移画面（不切视频）
+  if (el && getZoom(el).scale > 1.001) {
+    const t = e.touches[0];
+    startPan(el, t.clientX, t.clientY, { ids: [t.identifier] });
+    e.preventDefault();
+    return;
+  }
+
   const t = e.touches[0];
   onDragStart(screenToStage(t.clientX, t.clientY).y);
 }, { passive: false });
 
 window.addEventListener('touchmove', (e) => {
+  // 缩放手势进行中：吃掉事件（阻止页面滚动/浏览器缩放），只更新 transform
+  if (zoomGesture) {
+    e.preventDefault();
+    if (zoomGesture.mode === 'pinch') {
+      updatePinch(e);
+    } else if (zoomGesture.mode === 'pan' && !zoomGesture.mouse) {
+      const t = findTouch(e.touches, zoomGesture.ids[0]);
+      if (t) updatePanAt(t.clientX, t.clientY);
+    }
+    return;
+  }
   if (!state.isDragging) return;
   const t = e.touches[0];
   onDragMove(screenToStage(t.clientX, t.clientY).y);
 }, { passive: false });
 
-window.addEventListener('touchend', () => {
+window.addEventListener('touchend', (e) => {
+  if (zoomGesture) { endZoomGesture(e); return; }
   onDragEnd();
 });
 
-// 滚轮切换
+window.addEventListener('touchcancel', (e) => {
+  if (zoomGesture) { endZoomGesture(e); return; }
+  onDragEnd();
+});
+
+// 滚轮：切换视频；Ctrl+滚轮（触控板双指捏合）= 画面缩放
 viewport.addEventListener('wheel', (e) => {
   if (state.isSettingsOpen) return;
+  // 触控板捏合会派发 ctrlKey+wheel → 映射为以光标为焦点的连续缩放
+  if (e.ctrlKey) {
+    e.preventDefault();
+    const el = state.videoElements[state.currentIndex];
+    if (!el) return;
+    const target = getZoom(el).scale * Math.exp(-e.deltaY * 0.01);
+    zoomToScaleAt(el, target, e.clientX, e.clientY);
+    applyZoom(el, false);
+    return;
+  }
   e.preventDefault();
   if (e.deltaY > 50 && state.currentIndex < state.videos.length - 1) {
     loadVideoAtIndex(state.currentIndex + 1);
@@ -1598,11 +1917,13 @@ setupSlider('volume-track', 'volume-fill', 'volume-thumb', 'volume-value', state
 // 必须走瞬时校正，否则视频栈会带着过渡从旧视口高度滑过来，露出相邻视频的画面。
 window.addEventListener('resize', () => {
   recalibrateStack();
+  reclampCurrentZoom(); // 尺寸变化后按新几何重新夹紧缩放/平移，防止越界露黑边
   armRotationLock(); // 转屏过渡期：屏蔽合成 click 误触弹窗（debounce 覆盖整个过渡）
 });
 
 window.addEventListener('orientationchange', () => {
   recalibrateStack();
+  reclampCurrentZoom();
   armRotationLock(); // 转屏过渡期：屏蔽合成 click 误触弹窗（debounce 覆盖整个过渡）
 });
 

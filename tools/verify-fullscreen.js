@@ -179,6 +179,138 @@ class Cdp {
       Math.abs(align2.dTop) <= 2 && Math.abs(align2.dH) <= 2 && Math.abs(align2.prevBottom) <= 2,
       JSON.stringify(align2));
 
+    // ---- ③c/③d 切换视频不应重置控制栏显隐状态 ----
+    // 用户主动隐藏控制栏 → 切换视频 → 应仍保持隐藏（不被强制重新弹出）
+    await cdp.eval(`setControlsVisible(false)`);
+    await wait(80);
+    const hiddenBefore = await cdp.eval(`({
+      hidden: document.getElementById('player').classList.contains('controls-hidden'),
+      vis: state.isControlsVisible
+    })`);
+    await cdp.eval(`loadVideoAtIndex(2)`);
+    await wait(500);
+    const hiddenAfter = await cdp.eval(`({
+      hidden: document.getElementById('player').classList.contains('controls-hidden'),
+      vis: state.isControlsVisible,
+      idx: state.currentIndex,
+      overlayHidden: document.getElementById('play-overlay').classList.contains('hidden')
+    })`);
+    check('③c 切换视频后控制栏保持切换前的隐藏状态（不自动重新弹出）',
+      hiddenBefore.hidden && hiddenAfter.hidden && hiddenAfter.idx === 2 && hiddenAfter.overlayHidden,
+      JSON.stringify({ hiddenBefore, hiddenAfter }));
+
+    // 仅主动单击（toggleControls）后才恢复显示
+    await cdp.eval(`toggleControls()`);
+    await wait(120);
+    const afterTap = await cdp.eval(`({
+      hidden: document.getElementById('player').classList.contains('controls-hidden'),
+      vis: state.isControlsVisible
+    })`);
+    check('③d 切换后仅主动单击才恢复显示控制栏',
+      !afterTap.hidden && afterTap.vis, JSON.stringify(afterTap));
+
+    // ---- ⑯ 画面缩放：双击放大 → 一键复位 → 双指捏合 → 平移边界 → 手势协同 ----
+    // 先回到第 1 个视频：当前处在最后一个视频，无法验证"复位后恢复切换"
+    await cdp.eval(`loadVideoAtIndex(0)`);
+    await wait(500);
+
+    // 当前视频缩放状态（同时解析内联 transform，验证真的写进了 DOM）
+    const zoomState = () => cdp.eval(`(function(){
+      const el = state.videoElements[state.currentIndex];
+      const z = el.__zoom || { scale: 1, x: 0, y: 0 };
+      const m = /translate3d\\(([-\\d.]+)px,\\s*([-\\d.]+)px,\\s*0(?:px)?\\)\\s*scale\\(([-\\d.]+)\\)/.exec(el.style.transform || '');
+      const c = el.__cover ? /scale\\(([-\\d.]+)\\)/.exec(el.__cover.style.transform || '') : null;
+      return { scale: z.scale, x: z.x, y: z.y, parsed: m ? { x: +m[1], y: +m[2], s: +m[3] } : null,
+               coverScale: c ? +c[1] : null, w: el.offsetWidth, h: el.offsetHeight, idx: state.currentIndex };
+    })()`);
+
+    // 合成触摸事件（派发在当前视频元素上，冒泡到 viewport/window 上的监听器）
+    const touch = (type, points) => cdp.eval(`(function(){
+      const el = state.videoElements[state.currentIndex];
+      const mk = (p) => new Touch({ identifier: p.id, target: el, clientX: p.x, clientY: p.y, pageX: p.x, pageY: p.y });
+      const touches = ${JSON.stringify(points)}.map(mk);
+      el.dispatchEvent(new TouchEvent('${type}', { touches, targetTouches: touches, changedTouches: touches, bubbles: true, cancelable: true }));
+    })()`);
+
+    // 视频画面中心连点两次（双击）。
+    // 中心点取【视口】中心而非视频元素 rect：视频被缩放 transform 后其 rect 会偏离屏幕，
+    // 而视口(#video-viewport)本身不做缩放变换，中心始终等于画面中心。
+    const doubleTapCenter = () => cdp.eval(`(function(){
+      const el = state.videoElements[state.currentIndex];
+      const vp = document.getElementById('video-viewport').getBoundingClientRect();
+      const cx = vp.left + vp.width / 2, cy = vp.top + vp.height / 2;
+      for (let i = 0; i < 2; i++) {
+        el.dispatchEvent(new MouseEvent('click', { clientX: cx, clientY: cy, bubbles: true, cancelable: true }));
+      }
+    })()`);
+
+    // ⑯ 双击中间 → 以点击点为焦点放大到 2.5×（video 与封面同步）
+    await doubleTapCenter();
+    await wait(80);
+    const z1 = await zoomState();
+    check('⑯ 双击画面中间放大到 2.5×（transform 已应用、封面同步缩放）',
+      Math.abs(z1.scale - 2.5) < 0.01 && !!z1.parsed && Math.abs(z1.parsed.s - 2.5) < 0.01 && Math.abs((z1.coverScale || 0) - 2.5) < 0.01,
+      JSON.stringify(z1));
+
+    // ⑰a 复位按钮出现并显示倍率；⑰b 点击后一键恢复原始尺寸
+    const zoomBtn = await cdp.eval(`({
+      show: document.getElementById('zoom-reset-btn').classList.contains('show'),
+      text: (document.getElementById('zoom-reset-text') || {}).textContent
+    })`);
+    check('⑰a 放大后右下角出现"一键复位"按钮并显示当前倍率',
+      zoomBtn.show && /2\.5/.test(zoomBtn.text || ''), JSON.stringify(zoomBtn));
+    await cdp.eval(`document.getElementById('zoom-reset-btn').click()`);
+    await wait(400); // 等 0.22s 过渡结束
+    const z2 = await zoomState();
+    check('⑰b 点击复位按钮恢复原始尺寸（1×、零位移）',
+      z2.scale === 1 && z2.x === 0 && z2.y === 0 && !!z2.parsed && z2.parsed.s === 1, JSON.stringify(z2));
+
+    // ⑱ 双指捏合：间距 100 → 200，比例 ×2（以双指中点为焦点连续缩放）
+    await touch('touchstart', [{ id: 1, x: 100, y: 200 }, { id: 2, x: 200, y: 200 }]);
+    await touch('touchmove', [{ id: 1, x: 0, y: 200 }, { id: 2, x: 200, y: 200 }]);
+    await wait(60);
+    const z3 = await zoomState();
+    check('⑱ 双指捏合外扩连续放大（≈2×，不超 4× 上限）',
+      z3.scale > 1.9 && z3.scale < 2.1 && z3.scale <= 4, JSON.stringify(z3));
+
+    // ⑲a 放大后单指拖动 = 平移画面（不切换视频）；猛拖应被夹到左边界
+    const idxBeforePan = z3.idx;
+    await touch('touchend', []);
+    await touch('touchstart', [{ id: 3, x: 100, y: 200 }]);
+    await touch('touchmove', [{ id: 3, x: 20, y: 200 }]);
+    await touch('touchmove', [{ id: 3, x: -99999, y: 200 }]);
+    await wait(60);
+    const z4 = await zoomState();
+    const maxX = (z4.scale - 1) * z4.w;
+    check('⑲a 放大后单指拖动平移画面（不切换视频）',
+      z4.idx === idxBeforePan && z4.x < 0, JSON.stringify({ idx: idxBeforePan, x: z4.x }));
+    check('⑲b 平移边界正确（夹在 [-(比例-1)×宽, 0]，不露黑边）',
+      z4.x >= -maxX - 0.01 && z4.x <= 0.01, JSON.stringify({ x: z4.x, maxX }));
+
+    // ⑲c 放大期间大幅上滑也不切换视频（手势分工：放大态单指=平移）
+    await touch('touchend', []);
+    await touch('touchstart', [{ id: 4, x: 400, y: 350 }]);
+    await touch('touchmove', [{ id: 4, x: 400, y: 50 }]);
+    await touch('touchend', []);
+    await wait(120);
+    const z5 = await zoomState();
+    check('⑲c 放大态下上滑只平移、不切换视频', z5.idx === z4.idx, JSON.stringify({ from: z4.idx, to: z5.idx }));
+
+    // ⑳ 放大态下双击中间 → 一键恢复原始尺寸
+    await doubleTapCenter();
+    await wait(400);
+    const z6 = await zoomState();
+    check('⑳ 放大态下双击一键恢复原始尺寸',
+      z6.scale === 1 && z6.x === 0 && z6.y === 0, JSON.stringify(z6));
+
+    // ㉑ 复位后上滑重新触发切换视频（手势分工恢复）
+    await touch('touchstart', [{ id: 5, x: 400, y: 350 }]);
+    await touch('touchmove', [{ id: 5, x: 400, y: 50 }]);
+    await touch('touchend', []);
+    await wait(250);
+    const z7 = await zoomState();
+    check('㉑ 恢复原始尺寸后上滑重新触发切换视频', z7.idx === z6.idx + 1, JSON.stringify({ from: z6.idx, to: z7.idx }));
+
     // 全屏下"退出全屏"提示按钮应已取消
     const hint = await cdp.eval(`getComputedStyle(document.getElementById('landscape-hint')).display`);
     check('④ 全屏下"退出全屏"按钮已取消', hint === 'none', 'landscape-hint display=' + hint);
