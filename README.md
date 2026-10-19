@@ -42,7 +42,7 @@ local-video-player-mobile/
 ├── tools/                   # 无头验证脚本（Node + 无头 Chrome，无需真机）
 │   ├── mock-capacitor.js    # 注入假 Capacitor 桥 + 样本数据
 │   ├── verify-library.js    # 媒体库/导航/下拉刷新/返回键 验证
-│   └── verify-fullscreen.js # 全屏/转屏/播放按钮 回归验证
+│   └── verify-fullscreen.js # 全屏/转屏/播放按钮/缩放 回归验证
 ├── android/                 # Capacitor Android 工程
 │   ├── app/src/main/java/com/localvideo/player/
 │   │   ├── MainActivity.java         # 接管系统返回键（OnBackPressedDispatcher）
